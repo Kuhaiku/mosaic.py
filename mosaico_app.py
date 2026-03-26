@@ -4,8 +4,7 @@ import math
 import ctypes
 import subprocess
 import json
-import mysql.connector
-from datetime import datetime
+import requests
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QFileDialog, QRadioButton, QComboBox, 
                              QSpinBox, QDoubleSpinBox, QGraphicsView, QGraphicsScene, 
@@ -18,7 +17,7 @@ from PIL import Image
 Image.MAX_IMAGE_PIXELS = None
 
 # =====================================================================
-# 1. TELA DE ATIVAÇÃO E VALIDAÇÃO DE LICENÇA VIA MYSQL
+# 1. TELA DE ATIVAÇÃO E VALIDAÇÃO DE LICENÇA VIA API (NODE.JS)
 # =====================================================================
 class TelaAtivacao(QDialog):
     def __init__(self):
@@ -30,25 +29,21 @@ class TelaAtivacao(QDialog):
         self.hwid = self.obter_hwid()
         self.licenca_arquivo = "licenca_local.json"
         
-        # --- INSIRA AS CREDENCIAIS DO SEU BANCO DE DADOS AQUI ---
-        self.db_host = "SEU_HOST_AQUI"
-        self.db_user = "SEU_USUARIO"
-        self.db_pass = "SUA_SENHA"
-        self.db_name = "SEU_BANCO"
+        # --- CONFIGURAÇÃO DA API ---
+        # Troque 'localhost' pelo IP ou Domínio do seu servidor quando colocar no ar
+    # No Python (mosaico_app.py):
+        self.api_url = "https://w-raposotechlicencas.velmc0.easypanel.host/api/validar-licenca"
+        self.produto_id = 1 # ID do Gerador de Mosaicos no seu banco de dados
         
         self.initUI()
 
-    def conectar_banco(self):
-        return mysql.connector.connect(
-            host=self.db_host,
-            user=self.db_user,
-            password=self.db_pass,
-            database=self.db_name
-        )
-
     def obter_hwid(self):
         try:
-            return subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
+            # creationflags=subprocess.CREATE_NO_WINDOW impede que a tela preta do CMD pisque
+            flags = 0
+            if sys.platform == "win32":
+                flags = subprocess.CREATE_NO_WINDOW
+            return subprocess.check_output('wmic csproduct get uuid', creationflags=flags).decode().split('\n')[1].strip()
         except:
             return "HWID-NAO-DETECTADO"
 
@@ -64,11 +59,11 @@ class TelaAtivacao(QDialog):
         self.input_hwid = QLineEdit()
         self.input_hwid.setText(self.hwid)
         self.input_hwid.setReadOnly(True)
-        self.input_hwid.setStyleSheet("background-color: #eee; color: #333;")
+        self.input_hwid.setStyleSheet("background-color: #eee; color: #333; font-weight: bold;")
         form_layout.addRow("Seu Dispositivo (HWID):", self.input_hwid)
         
         self.input_chave = QLineEdit()
-        self.input_chave.setPlaceholderText("Ex: RAPOSO-2026-ABCD")
+        self.input_chave.setPlaceholderText("Ex: RAPOSO-MOSAICO-2026")
         form_layout.addRow("Chave de Ativação:", self.input_chave)
         
         layout.addLayout(form_layout)
@@ -105,43 +100,23 @@ class TelaAtivacao(QDialog):
             self.lbl_erro.setText(f"Erro: {msg}")
 
     def validar_online(self, chave_digitada):
-        conexao = None
-        cursor = None
+        payload = {
+            "chave": chave_digitada,
+            "hwid": self.hwid,
+            "produto_id": self.produto_id
+        }
+        
         try:
-            conexao = self.conectar_banco()
-            cursor = conexao.cursor(dictionary=True)
-
-            cursor.execute("SELECT * FROM licencas WHERE chave = %s", (chave_digitada,))
-            licenca = cursor.fetchone()
-
-            if not licenca:
-                return False, "Chave não encontrada."
-            if not licenca['ativa']:
-                return False, "Esta chave foi desativada pelo administrador."
-
-            data_exp = licenca['data_expiracao']
-            if datetime.now().date() > data_exp:
-                return False, "Sua licença expirou."
-
-            hwid_banco = licenca['hwid']
-
-            if not hwid_banco:
-                cursor.execute("UPDATE licencas SET hwid = %s WHERE id = %s", (self.hwid, licenca['id']))
-                conexao.commit()
-                return True, "Software ativado e vinculado a este computador!"
-
-            if hwid_banco != self.hwid:
-                return False, "Esta licença pertence a outro computador."
-
-            return True, "Licença validada com sucesso."
-
-        except mysql.connector.Error:
+            response = requests.post(self.api_url, json=payload, timeout=5)
+            dados = response.json()
+            
+            if response.status_code == 200:
+                return True, dados.get("message", "Sucesso")
+            else:
+                return False, dados.get("error", "Erro desconhecido retornado pelo servidor.")
+                
+        except requests.exceptions.RequestException:
             return False, "Sem conexão com o servidor de licenças. Verifique sua internet."
-        finally:
-            if cursor:
-                cursor.close()
-            if conexao and conexao.is_connected():
-                conexao.close()
 
     def verificar_licenca_existente(self):
         if not os.path.exists(self.licenca_arquivo):
@@ -168,7 +143,7 @@ class SplashScreen(QSplashScreen):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
         
-        self.pixmap1 = self.gerar_imagem("foto1.png", 1)
+        self.pixmap1 = self.gerar_imagem("icone.png", 1)
         self.pixmap2 = self.gerar_imagem("foto2.png", 2)
         
         self.setPixmap(self.pixmap1)
@@ -215,6 +190,7 @@ class MosaicoApp(QMainWindow):
         self.setWindowTitle("Gerador de Mosaicos - Raposo.tech")
         self.setGeometry(100, 100, 1200, 800)
         
+        # Define o ícone da janela
         self.setWindowIcon(QIcon("icone.png"))
         
         self.image_path = None
@@ -234,6 +210,7 @@ class MosaicoApp(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
 
+        # --- PAINEL ESQUERDO (Controles) ---
         control_panel = QWidget()
         control_panel.setFixedWidth(360)
         control_layout = QVBoxLayout(control_panel)
@@ -343,6 +320,7 @@ class MosaicoApp(QMainWindow):
 
         main_layout.addWidget(control_panel)
 
+        # --- PAINEL DIREITO (Preview Visual) ---
         self.scene = QGraphicsScene()
         self.view = QGraphicsView(self.scene)
         self.view.setStyleSheet("background-color: #1e1e1e; border: 1px solid #444;")
@@ -518,23 +496,26 @@ class MosaicoApp(QMainWindow):
 # 4. EXECUÇÃO PRINCIPAL DO APLICATIVO
 # =====================================================================
 if __name__ == '__main__':
+    # Configuração para o Windows exibir o ícone correto na barra de tarefas
     if sys.platform == 'win32':
         myappid = 'raposotech.mosaico.app.1.0'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     app = QApplication(sys.argv)
+    
+    # Define o ícone global (precisa existir o arquivo icone.png na mesma pasta)
     app.setWindowIcon(QIcon("icone.png"))
     
-    # 1. Validação da Licença
+    # 1. Validação da Licença via API
     ativador = TelaAtivacao()
     if not ativador.verificar_licenca_existente():
         resultado = ativador.exec()
         if resultado != QDialog.DialogCode.Accepted:
-            sys.exit() # Sai se o usuário não ativar
+            sys.exit() # Encerra se o usuário cancelar a ativação
     
     # 2. Inicia o Splash Screen e o Programa Principal
     janela_principal = MosaicoApp()
     splash = SplashScreen(janela_principal)
     splash.show()
     
-    sys.exit(app.exec())
+    sys.exit(app.exec())    
