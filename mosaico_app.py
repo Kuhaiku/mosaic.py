@@ -2,10 +2,14 @@ import sys
 import os
 import math
 import ctypes
+import subprocess
+import json
+import mysql.connector
+from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QFileDialog, QRadioButton, QComboBox, 
                              QSpinBox, QDoubleSpinBox, QGraphicsView, QGraphicsScene, 
-                             QMessageBox, QGroupBox, QFormLayout, QSplashScreen)
+                             QMessageBox, QGroupBox, QFormLayout, QSplashScreen, QDialog, QLineEdit)
 from PyQt6.QtGui import QPixmap, QPen, QColor, QPainter, QFont, QIcon
 from PyQt6.QtCore import Qt, QRectF, QTimer
 from PIL import Image
@@ -13,6 +17,150 @@ from PIL import Image
 # Permite que o Pillow processe imagens gigantes sem erro de segurança
 Image.MAX_IMAGE_PIXELS = None
 
+# =====================================================================
+# 1. TELA DE ATIVAÇÃO E VALIDAÇÃO DE LICENÇA VIA MYSQL
+# =====================================================================
+class TelaAtivacao(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Ativação do Produto - Raposo.tech")
+        self.setFixedSize(500, 250)
+        self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        
+        self.hwid = self.obter_hwid()
+        self.licenca_arquivo = "licenca_local.json"
+        
+        # --- INSIRA AS CREDENCIAIS DO SEU BANCO DE DADOS AQUI ---
+        self.db_host = "SEU_HOST_AQUI"
+        self.db_user = "SEU_USUARIO"
+        self.db_pass = "SUA_SENHA"
+        self.db_name = "SEU_BANCO"
+        
+        self.initUI()
+
+    def conectar_banco(self):
+        return mysql.connector.connect(
+            host=self.db_host,
+            user=self.db_user,
+            password=self.db_pass,
+            database=self.db_name
+        )
+
+    def obter_hwid(self):
+        try:
+            return subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
+        except:
+            return "HWID-NAO-DETECTADO"
+
+    def initUI(self):
+        layout = QVBoxLayout()
+        
+        lbl_info = QLabel("<b>Software não ativado ou licença expirada.</b><br>Insira sua chave de ativação para liberar o uso.")
+        lbl_info.setStyleSheet("font-size: 14px; margin-bottom: 10px;")
+        layout.addWidget(lbl_info)
+        
+        form_layout = QFormLayout()
+        
+        self.input_hwid = QLineEdit()
+        self.input_hwid.setText(self.hwid)
+        self.input_hwid.setReadOnly(True)
+        self.input_hwid.setStyleSheet("background-color: #eee; color: #333;")
+        form_layout.addRow("Seu Dispositivo (HWID):", self.input_hwid)
+        
+        self.input_chave = QLineEdit()
+        self.input_chave.setPlaceholderText("Ex: RAPOSO-2026-ABCD")
+        form_layout.addRow("Chave de Ativação:", self.input_chave)
+        
+        layout.addLayout(form_layout)
+        
+        self.lbl_erro = QLabel("")
+        self.lbl_erro.setStyleSheet("color: red; font-weight: bold;")
+        layout.addWidget(self.lbl_erro)
+        
+        btn_ativar = QPushButton("Verificar e Ativar")
+        btn_ativar.setMinimumHeight(40)
+        btn_ativar.setStyleSheet("background-color: #2E8B57; color: white; font-weight: bold;")
+        btn_ativar.clicked.connect(self.tentar_ativar)
+        layout.addWidget(btn_ativar)
+        
+        self.setLayout(layout)
+
+    def tentar_ativar(self):
+        chave_digitada = self.input_chave.text().strip()
+        if not chave_digitada:
+            self.lbl_erro.setText("Digite uma chave.")
+            return
+
+        self.lbl_erro.setText("Conectando ao servidor...")
+        QApplication.processEvents()
+
+        valido, msg = self.validar_online(chave_digitada)
+        
+        if valido:
+            with open(self.licenca_arquivo, 'w') as f:
+                json.dump({"chave": chave_digitada}, f)
+            QMessageBox.information(self, "Sucesso", msg)
+            self.accept()
+        else:
+            self.lbl_erro.setText(f"Erro: {msg}")
+
+    def validar_online(self, chave_digitada):
+        conexao = None
+        cursor = None
+        try:
+            conexao = self.conectar_banco()
+            cursor = conexao.cursor(dictionary=True)
+
+            cursor.execute("SELECT * FROM licencas WHERE chave = %s", (chave_digitada,))
+            licenca = cursor.fetchone()
+
+            if not licenca:
+                return False, "Chave não encontrada."
+            if not licenca['ativa']:
+                return False, "Esta chave foi desativada pelo administrador."
+
+            data_exp = licenca['data_expiracao']
+            if datetime.now().date() > data_exp:
+                return False, "Sua licença expirou."
+
+            hwid_banco = licenca['hwid']
+
+            if not hwid_banco:
+                cursor.execute("UPDATE licencas SET hwid = %s WHERE id = %s", (self.hwid, licenca['id']))
+                conexao.commit()
+                return True, "Software ativado e vinculado a este computador!"
+
+            if hwid_banco != self.hwid:
+                return False, "Esta licença pertence a outro computador."
+
+            return True, "Licença validada com sucesso."
+
+        except mysql.connector.Error:
+            return False, "Sem conexão com o servidor de licenças. Verifique sua internet."
+        finally:
+            if cursor:
+                cursor.close()
+            if conexao and conexao.is_connected():
+                conexao.close()
+
+    def verificar_licenca_existente(self):
+        if not os.path.exists(self.licenca_arquivo):
+            return False
+            
+        try:
+            with open(self.licenca_arquivo, 'r') as f:
+                dados = json.load(f)
+            chave = dados.get("chave", "")
+            
+            valido, _ = self.validar_online(chave)
+            return valido
+        except:
+            return False
+
+
+# =====================================================================
+# 2. TELA DE CARREGAMENTO (SPLASH SCREEN)
+# =====================================================================
 class SplashScreen(QSplashScreen):
     def __init__(self, main_window):
         super().__init__()
@@ -20,14 +168,11 @@ class SplashScreen(QSplashScreen):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
         
-        # Carrega as imagens e ajusta o tamanho máximo para 800x600
         self.pixmap1 = self.gerar_imagem("foto1.png", 1)
         self.pixmap2 = self.gerar_imagem("foto2.png", 2)
         
-        # Define a primeira imagem
         self.setPixmap(self.pixmap1)
         
-        # Agenda as transições (3000ms = 3 segundos)
         QTimer.singleShot(3000, self.trocar_imagem)
         QTimer.singleShot(6000, self.iniciar_programa)
 
@@ -42,14 +187,12 @@ class SplashScreen(QSplashScreen):
         largura_max = 800
         altura_max = 600
 
-        # Se a foto existir, carrega e redimensiona mantendo a proporção
         if os.path.exists(path):
             pixmap = QPixmap(path)
             return pixmap.scaled(largura_max, altura_max, 
                                  Qt.AspectRatioMode.KeepAspectRatio, 
                                  Qt.TransformationMode.SmoothTransformation)
         
-        # Fallback de segurança caso a foto não exista
         pixmap = QPixmap(largura_max, altura_max)
         cor = QColor("#2a2a2a") if num == 1 else QColor("#1e1e1e")
         pixmap.fill(cor)
@@ -63,13 +206,15 @@ class SplashScreen(QSplashScreen):
         return pixmap
 
 
+# =====================================================================
+# 3. APLICAÇÃO PRINCIPAL (GERADOR DE MOSAICOS)
+# =====================================================================
 class MosaicoApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Gerador de Mosaicos - Raposo.tech")
         self.setGeometry(100, 100, 1200, 800)
         
-        # Define o ícone da janela
         self.setWindowIcon(QIcon("icone.png"))
         
         self.image_path = None
@@ -89,7 +234,6 @@ class MosaicoApp(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
 
-        # --- PAINEL ESQUERDO (Controles) ---
         control_panel = QWidget()
         control_panel.setFixedWidth(360)
         control_layout = QVBoxLayout(control_panel)
@@ -199,7 +343,6 @@ class MosaicoApp(QMainWindow):
 
         main_layout.addWidget(control_panel)
 
-        # --- PAINEL DIREITO (Preview Visual) ---
         self.scene = QGraphicsScene()
         self.view = QGraphicsView(self.scene)
         self.view.setStyleSheet("background-color: #1e1e1e; border: 1px solid #444;")
@@ -371,18 +514,25 @@ class MosaicoApp(QMainWindow):
             self.btn_process.setText("Processar e Salvar Recortes")
             self.btn_process.setEnabled(True)
 
+# =====================================================================
+# 4. EXECUÇÃO PRINCIPAL DO APLICATIVO
+# =====================================================================
 if __name__ == '__main__':
-    # Configuração necessária para o Windows exibir o ícone corretamente na barra de tarefas
     if sys.platform == 'win32':
         myappid = 'raposotech.mosaico.app.1.0'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     app = QApplication(sys.argv)
-    
-    # Aplica o ícone globalmente na aplicação
     app.setWindowIcon(QIcon("icone.png"))
     
-    # Inicia e exibe primeiro a Splash Screen
+    # 1. Validação da Licença
+    ativador = TelaAtivacao()
+    if not ativador.verificar_licenca_existente():
+        resultado = ativador.exec()
+        if resultado != QDialog.DialogCode.Accepted:
+            sys.exit() # Sai se o usuário não ativar
+    
+    # 2. Inicia o Splash Screen e o Programa Principal
     janela_principal = MosaicoApp()
     splash = SplashScreen(janela_principal)
     splash.show()
