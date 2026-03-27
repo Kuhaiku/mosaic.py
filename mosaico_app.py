@@ -5,19 +5,38 @@ import ctypes
 import subprocess
 import json
 import requests
+import base64
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QFileDialog, QRadioButton, QComboBox, 
                              QSpinBox, QDoubleSpinBox, QGraphicsView, QGraphicsScene, 
                              QMessageBox, QGroupBox, QFormLayout, QSplashScreen, QDialog, QLineEdit)
-from PyQt6.QtGui import QPixmap, QPen, QColor, QPainter, QFont, QIcon
+from PyQt6.QtGui import QPixmap, QPen, QColor, QPainter, QFont, QIcon, QImage
 from PyQt6.QtCore import Qt, QRectF, QTimer
 from PIL import Image
 
-# Permite que o Pillow processe imagens gigantes sem erro de segurança
+import assets # Importa as imagens convertidas
+
+# Permite que o Pillow processe imagens gigantes
 Image.MAX_IMAGE_PIXELS = None
 
 # =====================================================================
-# 1. TELA DE ATIVAÇÃO E VALIDAÇÃO DE LICENÇA VIA API (NODE.JS)
+# FUNÇÕES DE MEMÓRIA E PASTA DE DADOS
+# =====================================================================
+def get_pixmap_from_base64(base64_str):
+    """ Converte a string Base64 do assets.py de volta para QPixmap (na memória) """
+    img_data = base64.b64decode(base64_str)
+    image = QImage.fromData(img_data)
+    return QPixmap.fromImage(image)
+
+def get_save_path():
+    """ Define local de gravação da licença na pasta AppData """
+    app_dir = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'RaposoTech')
+    if not os.path.exists(app_dir):
+        os.makedirs(app_dir)
+    return os.path.join(app_dir, 'licenca_local.json')
+
+# =====================================================================
+# 1. TELA DE ATIVAÇÃO
 # =====================================================================
 class TelaAtivacao(QDialog):
     def __init__(self):
@@ -26,112 +45,81 @@ class TelaAtivacao(QDialog):
         self.setFixedSize(500, 250)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
         
-        self.hwid = self.obter_hwid()
-        self.licenca_arquivo = "licenca_local.json"
+        # ÍCONE CARREGADO DA MEMÓRIA AQUI:
+        self.setWindowIcon(QIcon(get_pixmap_from_base64(assets.ICONE)))
         
-        # --- CONFIGURAÇÃO DA API ---
-        # Troque 'localhost' pelo IP ou Domínio do seu servidor quando colocar no ar
-    # No Python (mosaico_app.py):
-        self.api_url = "https://w-raposotechlicencas.velmc0.easypanel.host/api/validar-licenca"
-        self.produto_id = 1 # ID do Gerador de Mosaicos no seu banco de dados
+        self.hwid = self.obter_hwid()
+        self.licenca_arquivo = get_save_path()
+        
+        self.api_url = "https://w-raposotechlicencas.velmc0.easypanel.host/api/validar-licenca" 
+        self.produto_id = 1 
         
         self.initUI()
 
     def obter_hwid(self):
         try:
-            # creationflags=subprocess.CREATE_NO_WINDOW impede que a tela preta do CMD pisque
-            flags = 0
-            if sys.platform == "win32":
-                flags = subprocess.CREATE_NO_WINDOW
+            flags = 0x08000000 
             return subprocess.check_output('wmic csproduct get uuid', creationflags=flags).decode().split('\n')[1].strip()
         except:
             return "HWID-NAO-DETECTADO"
 
     def initUI(self):
         layout = QVBoxLayout()
-        
-        lbl_info = QLabel("<b>Software não ativado ou licença expirada.</b><br>Insira sua chave de ativação para liberar o uso.")
-        lbl_info.setStyleSheet("font-size: 14px; margin-bottom: 10px;")
+        lbl_info = QLabel("<b>Ativação Raposo.tech</b><br>Insira sua chave para liberar o uso.")
         layout.addWidget(lbl_info)
         
         form_layout = QFormLayout()
-        
-        self.input_hwid = QLineEdit()
-        self.input_hwid.setText(self.hwid)
+        self.input_hwid = QLineEdit(self.hwid)
         self.input_hwid.setReadOnly(True)
-        self.input_hwid.setStyleSheet("background-color: #eee; color: #333; font-weight: bold;")
-        form_layout.addRow("Seu Dispositivo (HWID):", self.input_hwid)
+        form_layout.addRow("ID Dispositivo:", self.input_hwid)
         
         self.input_chave = QLineEdit()
-        self.input_chave.setPlaceholderText("Ex: RAPOSO-MOSAICO-2026")
-        form_layout.addRow("Chave de Ativação:", self.input_chave)
-        
+        self.input_chave.setPlaceholderText("Cole sua chave aqui...")
+        form_layout.addRow("Chave:", self.input_chave)
         layout.addLayout(form_layout)
         
         self.lbl_erro = QLabel("")
-        self.lbl_erro.setStyleSheet("color: red; font-weight: bold;")
+        self.lbl_erro.setStyleSheet("color: red;")
         layout.addWidget(self.lbl_erro)
         
-        btn_ativar = QPushButton("Verificar e Ativar")
-        btn_ativar.setMinimumHeight(40)
-        btn_ativar.setStyleSheet("background-color: #2E8B57; color: white; font-weight: bold;")
+        btn_ativar = QPushButton("Ativar")
         btn_ativar.clicked.connect(self.tentar_ativar)
         layout.addWidget(btn_ativar)
-        
         self.setLayout(layout)
 
     def tentar_ativar(self):
-        chave_digitada = self.input_chave.text().strip()
-        if not chave_digitada:
-            self.lbl_erro.setText("Digite uma chave.")
-            return
-
-        self.lbl_erro.setText("Conectando ao servidor...")
-        QApplication.processEvents()
-
-        valido, msg = self.validar_online(chave_digitada)
+        chave = self.input_chave.text().strip()
+        if not chave: return
         
+        valido, msg = self.validar_online(chave)
         if valido:
-            with open(self.licenca_arquivo, 'w') as f:
-                json.dump({"chave": chave_digitada}, f)
-            QMessageBox.information(self, "Sucesso", msg)
-            self.accept()
+            try:
+                with open(self.licenca_arquivo, 'w') as f:
+                    json.dump({"chave": chave}, f)
+                self.accept()
+            except Exception as e:
+                QMessageBox.critical(self, "Erro de Permissão", f"Não foi possível salvar a licença: {e}")
         else:
-            self.lbl_erro.setText(f"Erro: {msg}")
+            self.lbl_erro.setText(msg)
 
-    def validar_online(self, chave_digitada):
-        payload = {
-            "chave": chave_digitada,
-            "hwid": self.hwid,
-            "produto_id": self.produto_id
-        }
-        
+    def validar_online(self, chave):
         try:
-            response = requests.post(self.api_url, json=payload, timeout=5)
-            dados = response.json()
-            
+            payload = {"chave": chave, "hwid": self.hwid, "produto_id": self.produto_id}
+            response = requests.post(self.api_url, json=payload, timeout=10)
             if response.status_code == 200:
-                return True, dados.get("message", "Sucesso")
-            else:
-                return False, dados.get("error", "Erro desconhecido retornado pelo servidor.")
-                
-        except requests.exceptions.RequestException:
-            return False, "Sem conexão com o servidor de licenças. Verifique sua internet."
+                return True, "Sucesso"
+            return False, response.json().get("error", "Erro na chave")
+        except Exception as e:
+            return False, f"Erro de conexão: {str(e)}"
 
     def verificar_licenca_existente(self):
-        if not os.path.exists(self.licenca_arquivo):
-            return False
-            
+        if not os.path.exists(self.licenca_arquivo): return False
         try:
             with open(self.licenca_arquivo, 'r') as f:
-                dados = json.load(f)
-            chave = dados.get("chave", "")
-            
+                chave = json.load(f).get("chave", "")
             valido, _ = self.validar_online(chave)
             return valido
-        except:
-            return False
-
+        except: return False
 
 # =====================================================================
 # 2. TELA DE CARREGAMENTO (SPLASH SCREEN)
@@ -143,8 +131,12 @@ class SplashScreen(QSplashScreen):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
         
-        self.pixmap1 = self.gerar_imagem("icone.png", 1)
-        self.pixmap2 = self.gerar_imagem("foto2.png", 2)
+        # FOTOS CARREGADAS DA MEMÓRIA AQUI:
+        pixmap1_raw = get_pixmap_from_base64(assets.FOTO1)
+        self.pixmap1 = pixmap1_raw.scaled(800, 600, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        
+        pixmap2_raw = get_pixmap_from_base64(assets.FOTO2)
+        self.pixmap2 = pixmap2_raw.scaled(800, 600, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         
         self.setPixmap(self.pixmap1)
         
@@ -158,29 +150,6 @@ class SplashScreen(QSplashScreen):
         self.main_window.show()
         self.close()
 
-    def gerar_imagem(self, path, num):
-        largura_max = 800
-        altura_max = 600
-
-        if os.path.exists(path):
-            pixmap = QPixmap(path)
-            return pixmap.scaled(largura_max, altura_max, 
-                                 Qt.AspectRatioMode.KeepAspectRatio, 
-                                 Qt.TransformationMode.SmoothTransformation)
-        
-        pixmap = QPixmap(largura_max, altura_max)
-        cor = QColor("#2a2a2a") if num == 1 else QColor("#1e1e1e")
-        pixmap.fill(cor)
-        
-        painter = QPainter(pixmap)
-        painter.setPen(QColor("white"))
-        painter.setFont(QFont("Arial", 24, QFont.Weight.Bold))
-        texto = f"Carregando Raposo.tech...\nTela {num}/2 (Adicione {path} na pasta)"
-        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, texto)
-        painter.end()
-        return pixmap
-
-
 # =====================================================================
 # 3. APLICAÇÃO PRINCIPAL (GERADOR DE MOSAICOS)
 # =====================================================================
@@ -190,8 +159,8 @@ class MosaicoApp(QMainWindow):
         self.setWindowTitle("Gerador de Mosaicos - Raposo.tech")
         self.setGeometry(100, 100, 1200, 800)
         
-        # Define o ícone da janela
-        self.setWindowIcon(QIcon("icone.png"))
+        # ÍCONE CARREGADO DA MEMÓRIA AQUI:
+        self.setWindowIcon(QIcon(get_pixmap_from_base64(assets.ICONE)))
         
         self.image_path = None
         self.original_pixmap = None
@@ -210,7 +179,6 @@ class MosaicoApp(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
 
-        # --- PAINEL ESQUERDO (Controles) ---
         control_panel = QWidget()
         control_panel.setFixedWidth(360)
         control_layout = QVBoxLayout(control_panel)
@@ -320,7 +288,6 @@ class MosaicoApp(QMainWindow):
 
         main_layout.addWidget(control_panel)
 
-        # --- PAINEL DIREITO (Preview Visual) ---
         self.scene = QGraphicsScene()
         self.view = QGraphicsView(self.scene)
         self.view.setStyleSheet("background-color: #1e1e1e; border: 1px solid #444;")
@@ -367,22 +334,17 @@ class MosaicoApp(QMainWindow):
         if self.radio_medida.isChecked():
             target_w_cm = self.spin_width_cm.value()
             target_h_cm = self.spin_height_cm.value()
-            
             cols = math.ceil(target_w_cm / paper_w_cm)
             rows = math.ceil(target_h_cm / paper_h_cm)
-            
             grid_w_cm = cols * paper_w_cm
             grid_h_cm = rows * paper_h_cm
-            
             return cols, rows, grid_w_cm, grid_h_cm, target_w_cm, target_h_cm
 
         else:
             cols = self.spin_cols.value()
             rows = self.spin_rows.value()
-            
             grid_w_cm = cols * paper_w_cm
             grid_h_cm = rows * paper_h_cm
-            
             return cols, rows, grid_w_cm, grid_h_cm, grid_w_cm, grid_h_cm
 
     def update_preview(self):
@@ -390,17 +352,14 @@ class MosaicoApp(QMainWindow):
             return
 
         self.scene.clear()
-        
         cols, rows, grid_w_cm, grid_h_cm, target_w_cm, target_h_cm = self.calculate_grid()
         
         pixmap_w = self.original_pixmap.width()
         pixmap_h = self.original_pixmap.height()
-        
         self.scene.addPixmap(self.original_pixmap)
         
         prop_orig = pixmap_w / pixmap_h
         prop_final = target_w_cm / target_h_cm if target_h_cm > 0 else prop_orig
-        
         desvio_percentual = ((prop_final / prop_orig) - 1) * 100
 
         self.lbl_prop_orig.setText(f"Proporção Original: 1 : {prop_orig:.2f}")
@@ -437,7 +396,6 @@ class MosaicoApp(QMainWindow):
                 self.scene.addLine(0, y, pixmap_w, y, pen)
 
         self.view.fitInView(QRectF(0, 0, pixmap_w, pixmap_h), Qt.AspectRatioMode.KeepAspectRatio)
-        
         self.lbl_info.setText(f"Páginas necessárias: {cols * rows} ({cols}x{rows})\nTamanho final impresso: {target_w_cm:.1f} x {target_h_cm:.1f} cm")
 
     def process_image(self):
@@ -458,7 +416,6 @@ class MosaicoApp(QMainWindow):
 
             target_w_px = int((target_w_cm / 2.54) * self.dpi)
             target_h_px = int((target_h_cm / 2.54) * self.dpi)
-            
             paper_w_px = int((paper_w_cm / 2.54) * self.dpi)
             paper_h_px = int((paper_h_cm / 2.54) * self.dpi)
 
@@ -496,26 +453,23 @@ class MosaicoApp(QMainWindow):
 # 4. EXECUÇÃO PRINCIPAL DO APLICATIVO
 # =====================================================================
 if __name__ == '__main__':
-    # Configuração para o Windows exibir o ícone correto na barra de tarefas
     if sys.platform == 'win32':
         myappid = 'raposotech.mosaico.app.1.0'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     app = QApplication(sys.argv)
     
-    # Define o ícone global (precisa existir o arquivo icone.png na mesma pasta)
-    app.setWindowIcon(QIcon("icone.png"))
+    # ÍCONE CARREGADO DA MEMÓRIA AQUI TAMBÉM:
+    app.setWindowIcon(QIcon(get_pixmap_from_base64(assets.ICONE)))
     
-    # 1. Validação da Licença via API
     ativador = TelaAtivacao()
     if not ativador.verificar_licenca_existente():
         resultado = ativador.exec()
         if resultado != QDialog.DialogCode.Accepted:
-            sys.exit() # Encerra se o usuário cancelar a ativação
+            sys.exit() 
     
-    # 2. Inicia o Splash Screen e o Programa Principal
     janela_principal = MosaicoApp()
     splash = SplashScreen(janela_principal)
     splash.show()
     
-    sys.exit(app.exec())    
+    sys.exit(app.exec())
