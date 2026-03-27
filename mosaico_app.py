@@ -132,7 +132,7 @@ class SplashScreen(QSplashScreen):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
         
         # FOTOS CARREGADAS DA MEMÓRIA AQUI:
-        pixmap1_raw = get_pixmap_from_base64(assets.FOTO1)
+        pixmap1_raw = get_pixmap_from_base64(assets.ICONE)
         self.pixmap1 = pixmap1_raw.scaled(800, 600, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         
         pixmap2_raw = get_pixmap_from_base64(assets.FOTO2)
